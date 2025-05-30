@@ -24,6 +24,16 @@ if __name__ == "__main__":
     model_name = args.model_name
     config = AutoConfig.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Some patching for AR models to work with masked filling out of the box
+    config.task_specific_params = {}
+    config.task_specific_params["text-generation"] = {
+      "do_sample": True,
+      "max_length": 512
+    }
+    tokenizer.mask_token = "ти"
+    tokenizer.mask_token_id = tokenizer.encode("ти")[1]
+
     
     # model = DiscreteDiffusionModel(args.base_model_name, config, tokenizer)
     model = DiscreteDiffusionModel.from_pretrained(
