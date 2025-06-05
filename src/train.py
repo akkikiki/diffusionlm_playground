@@ -63,13 +63,10 @@ def transition(x_0, sigma, maskable_mask, mask_token_id):
     return x_t
 
 def create_dataloader(
-    batch_size: int, block_size: int, data_dir: Path, accelerator, shuffle: bool = True, seed: int = 4756, split="train"
+    batch_size: int, block_size: int, data_dir: Path, accelerator, tokenizer, shuffle: bool = True, seed: int = 4756, split="train"
 ) -> DataLoader:
     datasets = []
     data_config = train_data_config if "train" in split else val_data_config
-    
-    # Load tokenizer (adjust model name as needed)
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")  # or your preferred tokenizer
     
     print(data_config)
     for dataset_name, weight in data_config:
@@ -112,6 +109,7 @@ def create_dataloaders(
     batch_size: int,
     block_size: int,
     accelerator,
+    tokenizer,
     train_data_dir: Path = Path("data/redpajama_sample"),
     val_data_dir: Optional[Path] = None,
     seed: int = 12345,
@@ -123,6 +121,7 @@ def create_dataloaders(
         block_size=effective_block_size,
         accelerator=accelerator,
         data_dir=train_data_dir,
+        tokenizer=tokenizer,
         shuffle=True,
         seed=seed,
         split="train"
@@ -134,6 +133,7 @@ def create_dataloaders(
             block_size=effective_block_size,
             accelerator=accelerator,
             data_dir=val_data_dir,
+            tokenizer=tokenizer,
             shuffle=False,
             seed=seed,
             split="validation"
@@ -163,23 +163,23 @@ def main(args):
         # fsdp_plugin=fsdp_plugin,
     )
     
-    # Initialize minimal distributed backend if not already done (needed for DeepSpeed)
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend='nccl' if torch.cuda.is_available() else 'gloo',
-            init_method='env://',
-            world_size=1,
-            rank=0
-        )
+    # Remove manual distributed initialization - let Accelerate/DeepSpeed handle it
         
     accelerator.init_trackers(project_name=args.wandb, init_kwargs={"wandb":{"name":args.output_dir.split("/")[-1]}})
     accelerator.print(f"Total GPUS: {accelerator.num_processes}")
     
-   
+    # Create tokenizer from the model
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    
+    # Add padding token if it doesn't exist (needed for LLaMA models)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     train_loader, val_dataloader = create_dataloaders(
         batch_size=args.batch_size,
         block_size=args.seq_length,
         accelerator=accelerator,
+        tokenizer=tokenizer,
         train_data_dir=Path(args.dataset),
         val_data_dir=None,
         seed=3407,
@@ -192,7 +192,6 @@ def main(args):
         _attn_implementation="flash_attention_2",
     )
 
-
     model_type = (
         "llama" if isinstance(model, transformers.LlamaForCausalLM) else "mistral"
     )
@@ -202,12 +201,30 @@ def main(args):
 
     if args.learning_rate != 2e-5:
         accelerator.print(f"Warning: You also need to modify accelerate_configs/zero3_offload.json to change the learning rate")
-    optim = DummyOptim(model.parameters(), lr=args.learning_rate)
-    scheduler = DummyScheduler(
-        optim,
-        num_training_steps=args.max_train_steps,
-        total_num_steps=args.max_train_steps,
-    )
+    
+    # Check if we're using DeepSpeed
+    use_deepspeed = hasattr(accelerator.state, 'deepspeed_plugin') and accelerator.state.deepspeed_plugin is not None
+    
+    if use_deepspeed:
+        # Use DummyOptim/DummyScheduler for DeepSpeed
+        optim = DummyOptim(model.parameters(), lr=args.learning_rate)
+        scheduler = DummyScheduler(
+            optim,
+            num_training_steps=args.max_train_steps,
+            total_num_steps=args.max_train_steps,
+        )
+    else:
+        # Use regular optimizers for non-DeepSpeed training
+        from torch.optim import AdamW
+        from transformers import get_linear_schedule_with_warmup
+        
+        optim = AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.95), weight_decay=0.1)
+        scheduler = get_linear_schedule_with_warmup(
+            optim,
+            num_warmup_steps=0,
+            num_training_steps=args.max_train_steps,
+        )
+    
     model, optim, scheduler = accelerator.prepare(model, optim, scheduler)
     train_loader = prepare_dataloader(args.parallel_mode, train_loader, accelerator)
     model.gradient_checkpointing_enable()
@@ -318,7 +335,12 @@ def main(args):
         # For single GPU, use simpler saving approach to avoid DeepSpeed issues
         if accelerator.num_processes == 1:
             unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(args.output_dir)
+            unwrapped_model.save_pretrained(
+                args.output_dir,
+                is_main_process=accelerator.is_main_process,
+                state_dict=accelerator.get_state_dict(model),
+            )
+            tokenizer.save_pretrained(args.output_dir)
         else:
             state_dict = accelerator.get_state_dict(model)
             accelerator.unwrap_model(model).save_pretrained(
@@ -327,6 +349,8 @@ def main(args):
                 save_function=accelerator.save,
                 state_dict=state_dict,
             )
+            if accelerator.is_main_process:
+                tokenizer.save_pretrained(args.output_dir)
 
         accelerator.print(f"Saving Finished")
 

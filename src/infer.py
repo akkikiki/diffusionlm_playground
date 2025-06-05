@@ -8,7 +8,6 @@ from model import DiscreteDiffusionModel, generate_samples
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--model_name", type=str, default='diffusionfamily/diffugpt-s')
-    parser.add_argument("--base_model_name", type=str, default='gpt2')
     parser.add_argument("--shift", type=bool, default=True) # do not change this
     parser.add_argument("--diffusion_steps", type=int, default=64)
     parser.add_argument("--logits_temp", type=float, default=0.95)
@@ -44,7 +43,7 @@ if __name__ == "__main__":
     
     # model = DiscreteDiffusionModel(args.base_model_name, config, tokenizer)
     model = DiscreteDiffusionModel.from_pretrained(
-        pretrained_model_name_or_path=args.base_model_name, 
+        pretrained_model_name_or_path=model_name, 
         config=config, 
     ).to('cuda')
 
