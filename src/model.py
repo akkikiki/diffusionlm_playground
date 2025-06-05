@@ -10,68 +10,27 @@ from transformers import PreTrainedModel, AutoModelForCausalLM, AutoConfig
 import torch.nn.functional as F
 import torch.nn as nn
 ## add attention_patch
-from huggingface_hub import PyTorchModelHubMixin
+from transformers import LlamaForCausalLM
 
-class DiscreteDiffusionModel(nn.Module, PyTorchModelHubMixin):
-    """
-    diffusion model
-    """
-    _supports_flash_attn_2 = True
-    _supports_sdpa = True
-    _supports_cache_class = True
-    _supports_quantized_cache = True
-    _supports_static_cache = True
 
-    def __init__(
-        self,
-        model,
-        config,
-        tokenizer,
-        device
-    ):
-        super().__init__()
-        if isinstance(model, str): # if use pre-trained model name from huggingface, e.g., gpt2, gpt2-medium.
-            config_pt = AutoConfig.from_pretrained(model)
-            self.model = AutoModelForCausalLM.from_config(config_pt)
-        else:
-            self.model = model
-        self.config = config
-        self.embed_dim = self.config.hidden_size
-        self.hidden_dim = self.config.hidden_size
-        if self.model.get_input_embeddings().weight.size(0) != len(tokenizer):
-            self.model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=2)
-        self.vocab_size = self.model.get_input_embeddings().weight.size(0)
-        if getattr(self.config, "model_type", None) == "gpt2":
-            self.embed_tokens = self.model.transformer.wte
-            self.denoise_model = self.model.transformer # use inputs_embeds instead of input_ids in forward function
-            for gpt2block in self.model.transformer.h:
-                gpt2block.attn.bias.fill_(True)  # remove causal mask
-            self.lm_head = self.model.lm_head
-            del self.denoise_model.wte
-        elif getattr(self.config, "model_type", None) == "llama":
-            self.embed_tokens = self.model.model.embed_tokens
-            self.denoise_model = self.model.model
-            self.lm_head = self.model.lm_head
-            del self.denoise_model.embed_tokens
-        del self.model
-        self.device = device
+class DiscreteDiffusionModel(LlamaForCausalLM):
 
     def get_logits(self, hidden_repr):
         return self.lm_head(hidden_repr)
 
     def get_input_embeddings(self):
-        return self.embed_tokens
+        return self.model.embed_tokens
     
     def get_embeds(self, input_ids):
-        return self.embed_tokens(input_ids)
+        return self.model.embed_tokens(input_ids)
     
     def forward(self, input_ids, attention_mask, inputs_embeds=None, labels=None, output_attentions=None, output_hidden_states=None, return_dict=None):
         """
         denoise the input
         """
         x_embed = self.get_embeds(input_ids)
-
-        x = self.denoise_model(inputs_embeds = x_embed, attention_mask=attention_mask, return_dict = False)[0]
+        #x = self.denoise_model(inputs_embeds = x_embed, attention_mask=attention_mask, return_dict = False)[0]
+        x = self.model(inputs_embeds = x_embed, attention_mask=attention_mask, return_dict = False)[0]
 
         logits = self.get_logits(x)
 
@@ -88,6 +47,7 @@ def generate_samples(model, diff_args, tokenizer, inputs, verbose=False):
     logits_temp = diff_args.logits_temp
     topp_temp = diff_args.topp_temp
 
+    print(f"inputs: {inputs}")
     x = inputs["input_ids"].to(model.device)
     if "src_mask" not in inputs:
         src_mask = torch.zeros_like(x, dtype=torch.bool).to(model.device)
@@ -103,8 +63,11 @@ def generate_samples(model, diff_args, tokenizer, inputs, verbose=False):
     
     # first forward, all position except src is [M]
     xt = x.masked_fill(maskable_mask, tokenizer.mask_token_id)
+    print(f"xt: {xt.shape}")
+    print(f"xt: {xt}")
 
     if verbose:
+        print("------")
         print(f"t=T(in):", tokenizer.decode(xt.tolist()[0]))
 
     logits = model(xt, attention_mask=attention_mask)
@@ -124,6 +87,7 @@ def generate_samples(model, diff_args, tokenizer, inputs, verbose=False):
     x0 = xt.masked_scatter(maskable_mask, x0[maskable_mask])
     if verbose:
         print(f"t=T(out):", tokenizer.decode(x0.tolist()[0]))
+        print("------")
 
     for t in range(diff_args.diffusion_steps-1, 0, -1): # t from T-1 to 1
         with torch.no_grad():
@@ -134,6 +98,7 @@ def generate_samples(model, diff_args, tokenizer, inputs, verbose=False):
             xt.masked_scatter_(masked_to_x0, x0[masked_to_x0])
             maskable_mask = maskable_mask.masked_fill(masked_to_x0, False)
             if verbose:
+                print("------")
                 print(f"t={t}(in):", tokenizer.decode(xt.tolist()[0]))
 
             logits = model(xt, attention_mask=attention_mask)
@@ -151,6 +116,7 @@ def generate_samples(model, diff_args, tokenizer, inputs, verbose=False):
             x0 = xt.masked_scatter(maskable_mask, x0[maskable_mask])
             if verbose:
                 print(f"t={t}(out):", tokenizer.decode(x0.tolist()[0]))
+                print("------")
             
     if diff_args.shift:
         x0 = x0[:,1:]

@@ -1,6 +1,5 @@
 import torch
 from transformers import AutoConfig, AutoTokenizer
-import torch.nn.functional as F
 from argparse import ArgumentParser
 
 
@@ -29,19 +28,24 @@ if __name__ == "__main__":
     config.task_specific_params = {}
     config.task_specific_params["text-generation"] = {
       "do_sample": True,
-      "max_length": 512
+      #"max_length": 512
+      #"max_length": 8
+      #"max_length": 16
+      #"max_length": 32
+      "max_length": 64 
     }
-    tokenizer.mask_token = "ти"
-    tokenizer.mask_token_id = tokenizer.encode("ти")[1]
+    #tokenizer.mask_token = "ти"
+    #tokenizer.mask_token_id = tokenizer.encode("ти")[1]
+    #tokenizer.mask_token = "<|reserved_special_token_247|>"
+    MASK_TOKEN = "<|eot_id|>"
+    tokenizer.mask_token = MASK_TOKEN
+    tokenizer.mask_token_id = tokenizer.encode(MASK_TOKEN)[1]
 
     
     # model = DiscreteDiffusionModel(args.base_model_name, config, tokenizer)
     model = DiscreteDiffusionModel.from_pretrained(
-        model_name, 
-        model=args.base_model_name, 
+        pretrained_model_name_or_path=args.base_model_name, 
         config=config, 
-        tokenizer=tokenizer,
-        device='cuda'
     ).to('cuda')
 
     # import pdb; pdb.set_trace();
@@ -62,7 +66,16 @@ if __name__ == "__main__":
     else:
         # conditional generation with custom prompt
         print("="*20, f"Conditional gen with prompt: '{args.prompt}'")
-        prefix = [tokenizer.bos_token_id] + tokenizer.encode(args.prompt)
+        
+        # Use apply_chat_template to format the prompt
+        messages = [{"role": "user", "content": args.prompt}]
+        formatted_prompt = tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True,
+        )
+        print(f"formatted_prompt: {formatted_prompt}")
+        prefix = tokenizer.encode(formatted_prompt, add_special_tokens=False)
         
         # Ensure prefix doesn't exceed generation length
         if len(prefix) >= gen_len:
@@ -81,17 +94,25 @@ if __name__ == "__main__":
         print(pred)
 
     # Optional: Keep the original example for demonstration
-    if not args.unconditional and args.prompt:
-        print("\n" + "="*20, "Example with default prompt...")
-        prefix = [tokenizer.bos_token_id] + tokenizer.encode("Today is a wonderful day,")
+    # if not args.unconditional and args.prompt:
+    #     print("\n" + "="*20, "Example with conditional generation...")
+    #     
+    #     # Also use apply_chat_template for the example
+    #     example_messages = [{"role": "user", "content": "Today is a wonderful day,"}]
+    #     example_formatted = tokenizer.apply_chat_template(
+    #         example_messages, 
+    #         tokenize=False, 
+    #         add_generation_prompt=True
+    #     )
+    #     prefix = tokenizer.encode(example_formatted)
 
-        src_mask = [1]*len(prefix)+[0]*(gen_len-len(prefix))
-        x0 = prefix + [0]*(gen_len-len(prefix))
+    #     src_mask = [1]*len(prefix)+[0]*(gen_len-len(prefix))
+    #     x0 = prefix + [0]*(gen_len-len(prefix))
 
-        inputs = {
-            "input_ids": torch.tensor([x0]), 
-            "src_mask": torch.tensor([src_mask])
-        }
-        res = generate_samples(model, args, tokenizer, inputs, verbose=args.verbose)
-        pred = tokenizer.decode(res.tolist()[0])
-        print(pred)
+    #     inputs = {
+    #         "input_ids": torch.tensor([x0]), 
+    #         "src_mask": torch.tensor([src_mask])
+    #     }
+    #     res = generate_samples(model, args, tokenizer, inputs, verbose=args.verbose)
+    #     pred = tokenizer.decode(res.tolist()[0])
+    #     print(pred)
