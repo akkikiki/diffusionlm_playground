@@ -151,7 +151,11 @@ class DreamGenerationConfig(GenerationConfig):
     def validate(self, is_init=False):
         pass
 
-class DreamGenerationMixin:
+class DreamGenerationRemaskingWrapper:
+    def __init__(self, model):
+        self.model = model
+        self.device = model.device
+
     @staticmethod
     def _expand_inputs_for_generation(
         expand_size: int = 1,
@@ -300,7 +304,7 @@ class DreamGenerationMixin:
         generation_config._mask_token_tensor = mask_token_tensor
 
     @torch.no_grad()
-    def diffusion_generate(
+    def diffusion_generate_remasking(
         self,
         inputs: Optional[torch.Tensor] = None,
         generation_config: Optional[DreamGenerationConfig] = None,
@@ -432,7 +436,8 @@ class DreamGenerationMixin:
         x = generation_tokens_hook_func(None, x, None)
         for i in range(steps):
             mask_index = (x == mask_token_id)
-            logits = self(x, attention_mask, tok_idx).logits
+            #logits = self(x, attention_mask, tok_idx).logits
+            logits = self.model(x, attention_mask, tok_idx).logits
             logits = torch.cat([logits[:,:1], logits[:, :-1]], dim=1)
 
             # this allows user-defined logits control of the intermediate steps
@@ -553,6 +558,7 @@ def adaptive_mask_by_entropy(input_ids, model, attention_mask=None,
     
     # Create mask for high-entropy tokens
     high_entropy_mask = entropy > entropy_threshold  # [batch_size, seq_len]
+    print(f"high_entropy_mask: {high_entropy_mask}")
     
     # Create the masked input
     masked_input_ids = input_ids.clone()

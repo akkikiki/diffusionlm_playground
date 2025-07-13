@@ -5,3 +5,5 @@ deepspeed
 pytest
 ring_flash_attn@git+https://github.com/zhuzilin/ring-flash-attention
 datasets
+wandb
+black

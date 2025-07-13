@@ -12,6 +12,7 @@ if __name__ == "__main__":
     parser.add_argument("--diffusion_steps", type=int, default=64)
     parser.add_argument("--logits_temp", type=float, default=0.95)
     parser.add_argument("--topp_temp", type=float, default=0.9)
+    parser.add_argument("--max_length", type=int, default=64, help="Maximum length of the generated text including the prompt")
     parser.add_argument("--verbose", type=bool, default=False) # print middle state
     parser.add_argument("--prompt", type=str, default="", help="Text prompt for conditional generation")
     parser.add_argument("--unconditional", action="store_true", help="Generate unconditionally (ignore prompt)")
@@ -31,7 +32,7 @@ if __name__ == "__main__":
       #"max_length": 8
       #"max_length": 16
       #"max_length": 32
-      "max_length": 64 
+      "max_length": args.max_length 
     }
     #tokenizer.mask_token = "ти"
     #tokenizer.mask_token_id = tokenizer.encode("ти")[1]
