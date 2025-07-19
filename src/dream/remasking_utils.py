@@ -152,9 +152,10 @@ class DreamGenerationConfig(GenerationConfig):
         pass
 
 class DreamGenerationRemaskingWrapper:
-    def __init__(self, model):
+    def __init__(self, model, tokenizer):
         self.model = model
         self.device = model.device
+        self.tokenizer = tokenizer
 
     @staticmethod
     def _expand_inputs_for_generation(
@@ -401,16 +402,18 @@ class DreamGenerationRemaskingWrapper:
         # Initialize x based on whether to use entropy-based masking
         if use_entropy_masking:
             # Use entropy-based adaptive masking
-            x, attention_mask, initial_entropy = adaptive_mask_by_entropy(
+            masked_input_ids, attention_mask, initial_entropy = adaptive_mask_by_entropy(
                 input_ids=input_ids,
-                model=self,
-                attention_mask=attention_mask,
+                model=self.model,
+                attention_mask=attention_mask.to(torch.float32),
                 entropy_threshold=entropy_threshold,
                 temperature=entropy_temperature,
                 mask_token_id=mask_token_id,
-                max_length=max_length
+                max_length=max_length,
+                tokenizer=self.tokenizer  # Pass tokenizer for debugging
             )
             logger.info(f"Applied entropy-based masking. Initial entropy stats: min={initial_entropy.min():.3f}, max={initial_entropy.max():.3f}, mean={initial_entropy.mean():.3f}")
+            x = F.pad(masked_input_ids, (0, max_length - masked_input_ids.shape[1]), value=mask_token_id)
         else:
             # Original simple padding with mask tokens
             x = F.pad(input_ids, (0, max_length - input_ids.shape[1]), value=mask_token_id)
@@ -436,6 +439,9 @@ class DreamGenerationRemaskingWrapper:
         x = generation_tokens_hook_func(None, x, None)
         for i in range(steps):
             mask_index = (x == mask_token_id)
+            # print(f"x: {x}")
+            # print(f"decoded x: {self.tokenizer.decode(x[0].tolist())}")
+            # print(f"mask_index: {mask_index}")
             #logits = self(x, attention_mask, tok_idx).logits
             logits = self.model(x, attention_mask, tok_idx).logits
             logits = torch.cat([logits[:,:1], logits[:, :-1]], dim=1)
@@ -519,7 +525,7 @@ def calculate_token_entropy(logits, temperature=1.0):
 
 def adaptive_mask_by_entropy(input_ids, model, attention_mask=None, 
                            entropy_threshold=2.0, temperature=1.0, 
-                           mask_token_id=None, max_length=None):
+                           mask_token_id=None, max_length=None, tokenizer=None):
     """
     Adaptively mask tokens based on their entropy instead of simple padding.
     
@@ -531,6 +537,7 @@ def adaptive_mask_by_entropy(input_ids, model, attention_mask=None,
         temperature: Temperature for entropy calculation
         mask_token_id: Token ID to use for masking
         max_length: Maximum sequence length
+        tokenizer: Tokenizer for debugging (optional)
     
     Returns:
         masked_input_ids: Input with high-entropy tokens masked
@@ -540,17 +547,18 @@ def adaptive_mask_by_entropy(input_ids, model, attention_mask=None,
     batch_size, seq_len = input_ids.shape
     
     # If max_length is specified and input is shorter, pad first
-    if max_length is not None and seq_len < max_length:
-        # Pad with a temporary token (we'll replace with masks based on entropy)
-        temp_pad_token = mask_token_id if mask_token_id is not None else 0
-        input_ids = F.pad(input_ids, (0, max_length - seq_len), value=temp_pad_token)
-        if attention_mask is not None:
-            attention_mask = F.pad(attention_mask, (0, max_length - seq_len), value=1.0)
-        seq_len = max_length
+    #if max_length is not None and seq_len < max_length:
+    #    # Pad with a temporary token (we'll replace with masks based on entropy)
+    #    temp_pad_token = mask_token_id if mask_token_id is not None else 0
+    #    input_ids = F.pad(input_ids, (0, max_length - seq_len), value=temp_pad_token)
+    #    if attention_mask is not None:
+    #        attention_mask = F.pad(attention_mask, (0, max_length - seq_len), value=1.0)
+    #    seq_len = max_length
+    # import ipdb; ipdb.set_trace(context=20)
     
     # Get model predictions for current input
     with torch.no_grad():
-        model_output = model(input_ids, attention_mask=attention_mask)
+        model_output = model(input_ids)
         logits = model_output.logits  # [batch_size, seq_len, vocab_size]
     
     # Calculate entropy for each token position
@@ -559,18 +567,89 @@ def adaptive_mask_by_entropy(input_ids, model, attention_mask=None,
     # Create mask for high-entropy tokens
     high_entropy_mask = entropy > entropy_threshold  # [batch_size, seq_len]
     print(f"high_entropy_mask: {high_entropy_mask}")
+    print(f"high_entropy_mask_sum: {high_entropy_mask.sum()}")
     
     # Create the masked input
     masked_input_ids = input_ids.clone()
     masked_input_ids[high_entropy_mask] = mask_token_id
-    
+
+    # Debug: Decode and print the masked input if tokenizer is provided
+    if tokenizer is not None:
+        print("\n=== DEBUG: Token Decoding ===")
+        print(f"Original input shape: {input_ids.shape}")
+        print(f"Masked input shape: {masked_input_ids.shape}")
+        
+        for batch_idx in range(min(2, batch_size)):  # Show first 2 batches
+            print(f"\n--- Batch {batch_idx} ---")
+            
+            # Decode original input
+            original_tokens = input_ids[batch_idx].tolist()
+            original_text = tokenizer.decode(original_tokens, skip_special_tokens=False)
+            print(f"Original text: {original_text}")
+            print(f"Original tokens: {original_tokens}")
+            
+            # Decode masked input
+            masked_tokens = masked_input_ids[batch_idx].tolist()
+            masked_text = tokenizer.decode(masked_tokens, skip_special_tokens=False)
+            print(f"Masked text: {masked_text}")
+            print(f"Masked tokens: {masked_tokens}")
+            
+            # Show which tokens were masked
+            masked_positions = high_entropy_mask[batch_idx].nonzero(as_tuple=True)[0].tolist()
+            print(f"Masked positions: {masked_positions}")
+            
+            # Show entropy values for masked positions
+            if len(masked_positions) > 0:
+                masked_entropies = entropy[batch_idx][masked_positions].tolist()
+                print(f"Entropy values at masked positions: {masked_entropies}")
+        
+        print("=== END DEBUG ===\n")
+
     # Update attention mask to ensure masked tokens are attended to
     if attention_mask is not None:
         # Ensure masked tokens have attention value of 1.0
         attention_mask = attention_mask.clone()
+        # import ipdb; ipdb.set_trace(context=20)
         attention_mask[high_entropy_mask] = 1.0
     
     return masked_input_ids, attention_mask, entropy
+
+def debug_token_decoding(input_ids, tokenizer, title="Token Decoding Debug"):
+    """
+    Utility function to decode and display token information for debugging.
+    
+    Args:
+        input_ids: Token IDs tensor [batch_size, seq_len]
+        tokenizer: Tokenizer for decoding
+        title: Title for the debug output
+    """
+    print(f"\n{'='*50}")
+    print(f"DEBUG: {title}")
+    print(f"{'='*50}")
+    
+    batch_size, seq_len = input_ids.shape
+    print(f"Input shape: {input_ids.shape}")
+    
+    for batch_idx in range(min(3, batch_size)):  # Show first 3 batches
+        print(f"\n--- Batch {batch_idx} ---")
+        
+        # Convert to list and decode
+        tokens = input_ids[batch_idx].tolist()
+        text = tokenizer.decode(tokens, skip_special_tokens=False)
+        
+        print(f"Text: {text}")
+        print(f"Tokens: {tokens}")
+        
+        # Show token details
+        for pos, token_id in enumerate(tokens):
+            try:
+                token_text = tokenizer.decode([token_id], skip_special_tokens=False)
+                print(f"  Pos {pos:2d}: ID {token_id:6d} -> '{token_text}'")
+            except:
+                print(f"  Pos {pos:2d}: ID {token_id:6d} -> [UNKNOWN]")
+    
+    print(f"{'='*50}\n")
+
 
 # Usage example for entropy-based masking:
 """

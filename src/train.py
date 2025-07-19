@@ -61,9 +61,11 @@ val_data_config = None
 def transition(x_0, sigma, maskable_mask, mask_token_id):
     # move_chance = 1 - (-sigma).exp()
     move_chance = sigma
+    print(f"move_chance: {move_chance}")
     move_indices = (
         torch.rand(*x_0.shape, device=x_0.device) < move_chance
     ) & maskable_mask
+    print(f"move_indices: {move_indices}")
     x_t = torch.where(move_indices, mask_token_id, x_0)
     return x_t
 
@@ -284,6 +286,7 @@ def main(args):
     )  # mask token id. can be a new token or an existing token.
 
     for step, batch in enumerate(train_loader):
+        print(f"-------step: {step}---------")
         input_ids = batch[..., : args.seq_length + 1]
         # print(input_ids.shape)
         target_ids = batch[..., : args.seq_length + 1]
@@ -313,6 +316,10 @@ def main(args):
         t = (1 - sampling_eps) * torch.rand(
             local_input_ids.shape[0], device=local_input_ids.device
         ) + sampling_eps
+        #t = torch.clamp(t, max=0.25)  # Cap t elements to be less than 0.5
+        #t = torch.clamp(t, max=0.1)  # Cap t elements to be less than 0.5
+        t = torch.clamp(t, max=0.01)  # Cap t elements to be less than 0.5
+        print(f"t: {t}")
         sigma = t
         dsigma = torch.reciprocal(t)  # dsigma = 1 / t
 
@@ -338,6 +345,7 @@ def main(args):
             ).reshape(local_target_ids.shape[0], -1)
             loss = loss.masked_fill(~loss_mask, 0)
             loss = (dsigma[:, None] * loss).sum() / loss_mask.sum()  # avg token loss
+            print(f"loss: {loss}")
             accelerator.backward(loss)
 
             if accelerator.sync_gradients:
